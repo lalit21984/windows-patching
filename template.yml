@@ -1,0 +1,300 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Windows Patching Pipeline"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  pPatchGroupId:
+    Type: String
+    Default: "PRTG"
+  # pSecurityGroupIds:
+    # Type: List<AWS::EC2::SecurityGroup::Id>
+  # pSubnetIds:
+    # Type: List<AWS::EC2::Subnet::Id>
+  pMaxCheckScanAttempts:
+    Type: Number
+    Default: "5"
+  pCheckScanWaitPeriod:
+    Type: Number
+    Default: "60"
+  pMaxCheckApplyAttempts:
+    Type: Number
+    Default: "5"
+  pCheckApplyWaitPeriod:
+    Type: Number
+    Default: "600"
+  pSnsNotificationEvents:
+    Type: CommaDelimitedList
+    Default: "ALL"
+
+Resources:
+  # rArtifactBucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties:
+  #     BucketName: !Sub "${AWS::StackName}-ArtifactBucket"
+  #     VersioningConfiguration:
+  #       Status: Enabled
+  #     PublicAccessBlockConfiguration:
+  #       BlockPublicAcls: true
+  #       BlockPublicPolicy: true
+  #       IgnorePublicAcls: true
+  #       RestrictPublicBuckets: true
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub "${AWS::StackName}-ArtifactBucket"
+
+  # rCodePipeline:
+  #   Type: AWS::CodePipeline::Pipeline
+  #   Properties:
+  #     Name: !Sub "${AWS::StackName}-Pipeline"
+  #     ArtifactStore:
+  #       Type: S3
+  #       Location: !Ref rArtifactBucket
+  #     RestartExecutionOnUpdate: true
+  #     RoleArn: !GetAtt rCodePipelineRole.Arn
+  #     Stages:
+  #       - Name: Source
+  #         Actions:
+  #           - Name: Source
+  #             ActionTypeId:
+  #               Category: Source
+  #               Owner: AWS
+  #               Version: "1"
+  #               Provider: S3
+  #             OutputArtifacts:
+  #               - Name: SourceArtifact
+  #             Configuration:
+  #               S3Bucket: !Ref rArtifactBucket
+  #               S3ObjectKey: !Ref SourceArtifactKey
+  #             RunOrder: 1
+  #       - Name: Patching
+  #         Actions:
+  #           - Name: Patching
+  #             ActionTypeId:
+  #               Category: Invoke
+  #               Owner: AWS
+  #               Version: "1"
+  #               Provider: StepFunctions
+  #             InputArtifacts:
+  #               - Name: SourceArtifact
+  #             OutputArtifacts:
+  #               - Name: PatchingOutputArtifact
+  #             Configuration:
+  #               StateMachineArn: !Ref rStateMachine
+  #             RunOrder: 1
+
+  # rCodePipelineRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     RoleName: !Sub "${AWS::StackName}-CodePipelineRole"
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service:
+  #               - codepipeline.amazonaws.com
+  #           Action:
+  #             - sts:AssumeRole
+  #     Path: /
+  #     Policies:
+  #       - PolicyName: !Sub "${AWS::StackName}-CodePipelinePolicy"
+  #         PolicyDocument:
+  #           Version: "2012-10-17"
+  #           Statement:
+  #             - Effect: Allow
+  #               Action:
+  #                 - s3:GetObject
+  #                 - s3:GetObjectVersion
+  #                 - s3:GetBucketVersioning
+  #               Resource:
+  #                 - !Ref rArtifactBucket
+  #             - Effect: Allow
+  #               Action:
+  #                 - codebuild:BatchGetBuilds
+  #                 - codebuild:StartBuild
+  #               Resource: "*"
+
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "${AWS::StackName}-StateMachine"
+      DefinitionUri: statemachine.asl.json
+      DefinitionSubstitutions:
+        LambdaFnArn: !Sub "arn:aws:lambda:${AWS::AccountId}:function:${AWS::StackName}-PatchingLambdaFn"
+        PatchGroupId: !Ref pPatchGroupId
+        PatchEventType: scan
+        OutputS3BucketName: !Ref rSsmLogsBucket
+        CloudWatchLogGroupName: !Ref rStateMachineLogGroup
+        SnsTopicRoleArn: !GetAtt rSnsTopicRole.Arn
+        SnsNotificationArn: !Ref rSnsTopic
+        SnsNotificationEvents: !Join [",", !Ref pSnsNotificationEvents]
+        SnsNotificationType: "Command"
+        MaxCheckScanAttempts: !Ref pMaxCheckScanAttempts
+        CheckScanWaitPeriod: !Ref pCheckScanWaitPeriod
+        MaxCheckApplyAttempts: !Ref pMaxCheckApplyAttempts
+        CheckApplyWaitPeriod: !Ref pCheckApplyWaitPeriod
+        LambdaTimeout: "600"
+        ExecutionApi: ""
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt rStateMachineLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      PropagateTags: True
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref rPatchingLambdaFn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+                - logs:CreateLogGroup
+                - logs:PutRetentionPolicy
+                - logs:PutDestination
+              Resource: "*"
+      Tracing:
+        Enabled: true
+      Type: STANDARD
+  
+  rStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${AWS::StackName}"
+      RetentionInDays: 7
+    # DeletionPolicy: Delete
+    # UpdateReplacePolicy: Delete
+
+  rSsmLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-ssm-logs"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ssm-logs"
+
+  rPatchingLambdaFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-PatchingLambdaFn"
+      Description: "Windows Server patching event handler"
+      CodeUri: ./lambda
+      Handler: app.event_handler
+      Runtime: python3.9
+      RuntimeManagementConfig:
+        UpdateRuntimeOn: FunctionUpdate
+      MemorySize: 256
+      PropagateTags: True
+      Timeout: 300
+      Tracing: Active
+      Role: !GetAtt rPatchingLambdaFnRole.Arn
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-StateMachine"
+      # VpcConfig:
+      #   SecurityGroupIds:
+      #     - !Ref LambdaSecurityGroup
+      #   SubnetIds:
+      #     - !Ref PublicSubnet
+
+  rPatchingLambdaFnLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-PatchingLambdaFn"
+      RetentionInDays: 7
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  rPatchingLambdaFnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-PatchingLambdaFnRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-PatchingLambdaFnPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sfn:SendTaskSuccess
+                  - sfn:SendTaskFailure
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution
+                  - ssm:SendCommand
+                  - ssm:DescribeInstancePatchStatesForPatchGroup
+                  - ssm:ListCommandInvocations
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ec2:RebootInstances
+                  - ec2:DescribeInstances
+                Resource: "*"
+                # Condition:
+                #   StringEquals:
+                #     ec2:ResourceTag/os: windows
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref rSnsTopic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  rSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName}-SnsTopic"
+      TopicName: !Sub "${AWS::StackName}-SnsTopic"
+
+  rSnsTopicRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-SnsTopicRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sns.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-SnsTopicPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref rSnsTopic

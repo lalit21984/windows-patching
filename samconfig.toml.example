@@ -1,0 +1,10 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "windows-patching-pipeline"
+resolve_s3 = true
+s3_prefix = "windows-patching-pipeline"
+region = "us-east-1"
+profile = ""
+confirm_changeset = true
+capabilities = "CAPABILITY_NAMED_IAM"
+image_repositories = []

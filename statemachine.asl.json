@@ -1,0 +1,160 @@
+{
+    "Version": "1.0",
+    "Comment": "Workflow for patching Windows instances",
+    "StartAt": "Scan_Instances",
+    "States": {
+        "Scan_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_group_id": "${PatchGroupId}",
+                    "patch_event_type": "${PatchEventType}",
+                    "max_check_scan_attempts": "${MaxCheckScanAttempts}",
+                    "check_scan_wait_period": "${CheckScanWaitPeriod}",
+                    "max_check_apply_attempts": "${MaxCheckApplyAttempts}",
+                    "check_apply_wait_period": "${CheckApplyWaitPeriod}",
+                    "output_s3_bucket_name": "${OutputS3BucketName}",
+                    "cloudwatch_log_group_name": "${CloudWatchLogGroupName}",
+                    "sns_topic_role_arn": "${SnsTopicRoleArn}",
+                    "sns_notification_arn": "${SnsNotificationArn}",
+                    "sns_notification_events": "${SnsNotificationEvents}",
+                    "sns_notification_type": "${SnsNotificationType}"
+                },
+                "LogType": "Tail"
+            },
+            "Next": "Wait_Scan"
+        },
+        "Check_Scan_Status": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "check_scan"
+                }
+            },
+            "Next": "Check_Scan_Progress"
+        },
+        "Check_Scan_Progress": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.Payload.body.status",
+                    "BooleanEquals": true,
+                    "Next": "Apply_Patch_Instances"
+                },
+                {
+                    "Variable": "$.Payload.body.status",
+                    "BooleanEquals": false,
+                    "Next": "Wait_Scan"
+                }
+            ]
+        },
+        "Wait_Scan": {
+            "Type": "Wait",
+            "SecondsPath": "$.Payload.body.check_scan_wait_period",
+            "Next": "Check_Scan_Status"
+        },
+        "Apply_Patch_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "apply",
+                    "output_s3_bucket_name": "${OutputS3BucketName}",
+                    "cloudwatch_log_group_name": "${CloudWatchLogGroupName}",
+                    "sns_topic_role_arn": "${SnsTopicRoleArn}",
+                    "sns_notification_arn": "${SnsNotificationArn}",
+                    "sns_notification_events": "${SnsNotificationEvents}",
+                    "sns_notification_type": "${SnsNotificationType}"
+                }
+            },
+            "Next": "Wait_Patch"
+        },
+        "Check_Patch_Status": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "check_apply"
+                }
+            },
+            "Next": "Check_Patch_Progress"
+        },
+        "Check_Patch_Progress": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.Payload.body.status",
+                    "BooleanEquals": true,
+                    "Next": "Send_Manual_Approval"
+                },
+                {
+                    "Variable": "$.Payload.body.status",
+                    "BooleanEquals": false,
+                    "Next": "Wait_Patch"
+                }
+            ]
+        },
+        "Wait_Patch": {
+            "Type": "Wait",
+            "SecondsPath": "$.Payload.body.check_scan_wait_period",
+            "Next": "Check_Patch_Status"
+        },
+        "Send_Manual_Approval": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "ExecutionContext.$": "$$",
+                    "APIGatewayEndpoint": "https://${ExecutionApi}.execute-api.${AWS::Region}.amazonaws.com/states"
+                }
+            },
+            "Next": "Manual_Approval_Choice"
+        },
+        "Manual_Approval_Choice": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.Payload.body.status",
+                    "StringEquals": "approved",
+                    "Next": "Reboot_Instances"
+                },
+                {
+                    "Variable": "$.Payload.body.status",
+                    "StringEquals": "declined",
+                    "Next": "ManualApprovalFailState"
+                }
+            ]
+        },
+        "Reboot_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "reboot"
+                }
+            },
+            "Next": "SuccessState"
+        },
+        "SuccessState": {
+            "Type": "Succeed"
+        },
+        "ManualApprovalFailState": {
+            "Type": "Fail",
+            "Cause": "Manual approval to reboot instances was declined"
+        }
+    }
+}
