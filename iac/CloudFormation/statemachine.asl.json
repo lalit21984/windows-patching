@@ -1,0 +1,166 @@
+{
+    "Version": "1.0",
+    "Comment": "Workflow for patching Windows instances",
+    "StartAt": "Scan_Instances",
+    "States": {
+        "Scan_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_group_id": "${PatchGroupId}",
+                    "patch_event_type": "${PatchEventType}",
+                    "max_check_scan_attempts": "${MaxCheckScanAttempts}",
+                    "check_scan_wait_period": "${CheckScanWaitPeriod}",
+                    "output_s3_bucket_name": "${OutputS3BucketName}",
+                    "cloudwatch_log_group_name": "${CloudWatchLogGroupName}",
+                    "sns_topic_role_arn": "${SnsTopicRoleArn}",
+                    "sns_notification_arn": "${SnsNotificationArn}",
+                    "sns_notification_events": "${SnsNotificationEvents}",
+                    "sns_notification_type": "${SnsNotificationType}"
+                },
+                "LogType": "Tail"
+            },
+            "OutputPath": "$.Payload",
+            "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+            ],
+            "Next": "Wait_Scan"
+        },
+        "Check_Scan_Status": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "check_scan",
+                    "patch_group_id": "${PatchGroupId}",
+                    "max_check_scan_attempts": "${MaxCheckScanAttempts}",
+                    "check_scan_wait_period": "${CheckScanWaitPeriod}"
+                }
+            },
+            "OutputPath": "$.Payload",
+            "Next": "Check_Scan_Progress"
+        },
+        "Check_Scan_Progress": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.body.status",
+                    "BooleanEquals": true,
+                    "Next": "Apply_Patch_Instances"
+                },
+                {
+                    "Variable": "$.body.status",
+                    "BooleanEquals": false,
+                    "Next": "Wait_Scan"
+                }
+            ]
+        },
+        "Wait_Scan": {
+            "Type": "Wait",
+            "Seconds": 60,
+            "Next": "Check_Scan_Status"
+        },
+        "Apply_Patch_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "apply",
+                    "patch_group_id": "${PatchGroupId}",
+                    "max_check_apply_attempts": "${MaxCheckApplyAttempts}",
+                    "check_apply_wait_period": "${CheckApplyWaitPeriod}",
+                    "output_s3_bucket_name": "${OutputS3BucketName}",
+                    "cloudwatch_log_group_name": "${CloudWatchLogGroupName}",
+                    "sns_topic_role_arn": "${SnsTopicRoleArn}",
+                    "sns_notification_arn": "${SnsNotificationArn}",
+                    "sns_notification_events": "${SnsNotificationEvents}",
+                    "sns_notification_type": "${SnsNotificationType}"
+                }
+            },
+            "OutputPath": "$.Payload",
+            "Next": "Wait_Patch"
+        },
+        "Check_Patch_Status": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "check_apply",
+                    "patch_group_id": "${PatchGroupId}",
+                    "max_check_apply_attempts": "${MaxCheckApplyAttempts}",
+                    "check_apply_wait_period": "${CheckApplyWaitPeriod}"
+                }
+            },
+            "OutputPath": "$.Payload",
+            "Next": "Check_Patch_Progress"
+        },
+        "Check_Patch_Progress": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.body.status",
+                    "BooleanEquals": true,
+                    "Next": "Verify_Patch"
+                },
+                {
+                    "Variable": "$.body.status",
+                    "BooleanEquals": false,
+                    "Next": "Wait_Patch"
+                }
+            ]
+        },
+        "Verify_Patch": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "verify_patch",
+                    "patch_group_id": "${PatchGroupId}"
+                }
+            },
+            "OutputPath": "$.Payload",
+            "Next": "Reboot_Instances"
+        },
+        "Wait_Patch": {
+            "Type": "Wait",
+            "SecondsPath": "$.body.check_apply_wait_period",
+            "Next": "Check_Patch_Status"
+        },
+        "Reboot_Instances": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${LambdaFnArn}",
+                "Payload": {
+                    "Input.$": "$",
+                    "patch_event_type": "reboot",
+                    "patch_group_id": "${PatchGroupId}"
+                }
+            },
+            "Next": "SuccessState"
+        },
+        "SuccessState": {
+            "Type": "Succeed"
+        }
+    }
+}

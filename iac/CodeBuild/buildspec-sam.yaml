@@ -1,0 +1,42 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+        python: 3.7
+        docker: 18
+  pre_build:
+    commands:
+      - pip install --upgrade pip
+      - pip install --upgrade awscli aws-sam-cli pytest flake8 # https://pypi.org/project/flake8/
+      #- flake8 --ignore= --max-complexity=10 `pwd`
+      - timestamp=$(date +%Y%m%d%H%M)
+      - echo "{\"timestamp\":\"${timestamp}\"}" > /tmp/timestamp.json
+      - |-
+        echo "{\"dynamodb.version\":\"$(cat /tmp/app_version.txt)\", \
+        \"dynamodb.source_version\":\"${CODEBUILD_RESOLVED_SOURCE_VERSION}\", \
+        \"dynamodb.build_id\":\"${CODEBUILD_BUILD_ID}\"}" > build.json
+  build:
+    commands:
+      #- python -m unittest discover test
+      - sam build -t iac/CloudFormation/sam.yaml --use-container
+  post_build:
+    commands:
+      - sam package
+        --template-file .aws-sam/build/template.yaml
+        --s3-bucket ${TEMPLATE_BUCKET}
+        --kms-key-id ${KMS_ARN}
+        --output-template-file /tmp/sam-export.yaml
+      - sam package
+        --template-file .aws-sam/build/template.yaml
+        --s3-bucket ${TEMPLATE_BUCKET}
+        --kms-key-id ${KMS_ARN}
+        --output-template-file /tmp/sam-r2-export.yaml
+
+artifacts:
+  files:
+    - /tmp/sam-export.yaml
+    - /tmp/sam-r2-export.yaml
+    - /tmp/timestamp.json
+    - /tmp/pipeline_artifacts.json
+  discard-paths: yes

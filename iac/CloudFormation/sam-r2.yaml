@@ -1,0 +1,355 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Windows Patching Pipeline sam template"
+Transform: 'AWS::Serverless-2016-10-31'
+
+Parameters:
+  pProduct:
+    Type: String
+  pTeam:
+    Type: String
+  pCodePipelineArtifactBucket:
+    Type: String
+  pPatchGroupId:
+    Type: String
+    Default: "net"
+  pMaxCheckScanAttempts:
+    Type: Number
+    Default: "5"
+  pCheckScanWaitPeriod:
+    Type: Number
+    Default: "60"
+  pMaxCheckApplyAttempts:
+    Type: Number
+    Default: "5"
+  pCheckApplyWaitPeriod:
+    Type: Number
+    Default: "600"
+  pSnsNotificationEvents:
+    Type: CommaDelimitedList
+    Default: "All"
+  pSnsNotificationType:
+    Type: String
+    Default: "Command"
+
+Resources:
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: Windows Patching Manual Approval
+      StageName: manual_approval
+      Description: Windows Patching - Human approval endpoint
+      AlwaysDeploy: true
+      Auth:
+        ResourcePolicy:
+          CustomStatements: {
+              Effect: 'Allow',
+              Action: 'execute-api:Invoke', 
+              Resource: ['execute-api:/*/*/*'],
+              Principal: '*'
+            }
+  StateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn:
+      - ApiGateway
+    Properties:
+      Name: !Sub "${AWS::StackName}-StateMachine"
+      DefinitionUri: statemachine.asl.json
+      DefinitionSubstitutions:
+        LambdaFnArn: !Sub "arn:${AWS::Partition}:lambda:${AWS::AccountId}:function:${AWS::StackName}-PatchingLambdaFn"
+        PatchGroupId: !Ref pPatchGroupId
+        PatchEventType: scan
+        OutputS3BucketName: !Ref rSsmLogsBucket
+        CloudWatchLogGroupName: !Ref rStateMachineLogGroup
+        SnsTopicRoleArn: !GetAtt rSnsTopicRole.Arn
+        SnsNotificationArn: !Ref rSnsTopic
+        SnsManualApprovalArn: !Ref rApprvlSnsTopic
+        SnsNotificationEvents: !Join [",", !Ref pSnsNotificationEvents]
+        SnsNotificationType: !Ref pSnsNotificationType
+        MaxCheckScanAttempts: !Ref pMaxCheckScanAttempts
+        CheckScanWaitPeriod: !Ref pCheckScanWaitPeriod
+        MaxCheckApplyAttempts: !Ref pMaxCheckApplyAttempts
+        CheckApplyWaitPeriod: !Ref pCheckApplyWaitPeriod
+        ExecutionApi: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/manual_approval"
+        LambdaTimeout: "600"
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt rStateMachineLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      PropagateTags: True
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref rPatchingLambdaFn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - "logs:*"
+              Resource: "*"
+      Tracing:
+        Enabled: true
+      Type: STANDARD
+  
+  rStateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/${AWS::StackName}"
+      RetentionInDays: 7
+
+
+  rSsmLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "pm-hpl-windows-patching-ssm-logs-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-ssm-logs"
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+
+  rPatchingLambdaFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-PatchingLambdaFn"
+      Description: "Windows Server patching event handler"
+      CodeUri: ./lambda/patching
+      Handler: app.event_handler
+      Runtime: python3.9
+      RuntimeManagementConfig:
+        UpdateRuntimeOn: FunctionUpdate
+      MemorySize: 256
+      PropagateTags: True
+      Timeout: 300
+      Tracing: Active
+      Role: !GetAtt rPatchingLambdaFnRole.Arn
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-StateMachine"
+
+  rApprvlLambdaFn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-MApprLambdaFn"
+      Description: "Manual approval event handler"
+      CodeUri: ./lambda/manual_approval
+      Handler: app.event_handler
+      Runtime: python3.9
+      RuntimeManagementConfig:
+        UpdateRuntimeOn: FunctionUpdate
+      MemorySize: 256
+      PropagateTags: True
+      Timeout: 300
+      Tracing: Active
+      Role: !GetAtt rApprvlLambdaFnRole.Arn
+      Events:
+        HttpGetApproval:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /approve
+            Method: get
+            RequestParameters:
+              - method.request.querystring.task_token:
+                  Required: true
+                  Caching: false
+        HttpGetReject:
+          Type: Api
+          Properties:
+            RestApiId: !Ref ApiGateway
+            Path: /reject
+            Method: get
+            RequestParameters:
+              - method.request.querystring.task_token:
+                  Required: true
+                  Caching: false
+
+  rPatchingLambdaFnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-PatchingLambdaFnRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-PatchingLambdaFnPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:StartAutomationExecution
+                  - ssm:SendCommand
+                  - ssm:DescribeInstancePatchStatesForPatchGroup
+                  - ssm:ListCommandInvocations
+                  - s3:*
+                Resource: "*"
+              - Effect: Allow
+                Action: 
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+                Condition:
+                  "ForAnyValue:StringEquals":
+                    kms:ResourceAliases:
+                      - "alias/pm-hpl-windows-patching-SAM-pact-pdi-hpl-apprvlSNS"
+              - Effect: Allow
+                Action:
+                  - ec2:RebootInstances
+                  - ec2:DescribeInstances
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: 
+                  - !Ref rSnsTopic
+                  - !Ref rApprvlSnsTopic
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}-SnsTopicRole"
+
+  rApprvlLambdaFnRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-ApprvlLambdaFnRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-ManualApprovalLambdaFnPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sfn:SendTaskSuccess
+                  - sfn:SendTaskFailure
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: !Sub "arn:${AWS::Partition}:logs:*:*:*"
+              - Effect: Allow
+                Action:
+                  - states:SendTaskSuccess
+                  - states:SendTaskFailure
+                Resource: !Sub "arn:${AWS::Partition}:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-StateMachine"
+
+  rSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName}-SnsTopic"
+      TopicName: !Sub "${AWS::StackName}-SnsTopic"
+
+  rApprvlSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub "${AWS::StackName}-apr-SnsTopic"
+      TopicName: !Sub "${AWS::StackName}-apr-SnsTopic"
+      KmsMasterKeyId: !Ref rSNSkmsKey
+
+  rApprvlSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref rApprvlSnsTopic
+      PolicyDocument:
+        Statement:
+          - Sid: Allowlambda
+            Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: 
+              - sns:Publish
+            Resource: 
+              - !Ref rApprvlSnsTopic
+
+  rSNSkmsKey:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Used for SNS Encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: !Ref AWS::StackName
+        Statement:
+          - Sid: Allow access for Key Administrators
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/CodePipeline-Action
+                - !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - kms:*
+            Resource: "*"
+          - Sid: Allow access for CloudWatch Service
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudwatch.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey*
+            Resource: "*"
+
+  rKmsAlias:
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${AWS::StackName}-apprvlSNS
+      TargetKeyId: !Ref rSNSkmsKey
+
+  rSnsTopicRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-SnsTopicRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - sns.amazonaws.com
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-SnsTopicPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref rSnsTopic
+                  - !Ref rApprvlSnsTopic

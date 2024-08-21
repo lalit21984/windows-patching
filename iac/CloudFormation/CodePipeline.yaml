@@ -1,0 +1,693 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Builds a CI/CD Pipeline to deploy a Serverless Application using Serverless Application Model (SAM).
+
+Parameters:
+  pProduct:
+    Type: String
+    Description: Product Name
+    Default: ""
+  pDeploymentRegion:
+    Type: String
+    AllowedValues:
+      - "us-east-1"
+      - "us-west-2"
+      - "both"
+    Default: "both"
+  pAppSubnetId1:
+    Type: String
+    Default: "sb-1"
+  pAppSubnetId2:
+    Type: String
+    Default: "sb-2"
+# Optional Configuration File for Dev
+  pConfigurationPathDev: 
+    Type: String
+    Default: 'iac/CloudFormation/config/us-east-1/configuration-dev.json'
+    Description: (Optional) CloudFormation Configuration file for Dev
+# Optional Configuration File for Test
+  pConfigurationPathTest: 
+    Type: String
+    Default: 'iac/CloudFormation/config/us-east-1/configuration-test.json'
+    Description: (Optional) CloudFormation Configuration file for Test
+# Optional Configuration File for PreProd
+  pConfigurationPathPreProd: 
+    Type: String
+    Default: 'iac/CloudFormation/config/us-east-1/configuration-preprod.json'
+    Description: (Optional) CloudFormation Configuration file for PreProd
+# Optional Configuration File for Prod
+  pConfigurationPathProd: 
+    Type: String
+    Default: 'iac/CloudFormation/config/us-east-1/configuration-prod.json'
+    Description: (Optional) CloudFormation Configuration file for Prod
+############# Adding Region West 2 to pipeline ################
+# Optional Configuration File for Prod Region 2
+  pConfigurationPathProdR2: 
+    Type: String
+    Default: 'iac/CloudFormation/config/us-west-2/configuration-prod.json'
+    Description: (Optional) CloudFormation Configuration file for Prod Region 2
+# Build Project: Yes / No
+  pUseCodeBuildProject: 
+    Type: String
+    AllowedValues:
+      - 'Yes'
+      - 'No'
+    Default: 'No'
+    Description: Create a CodeBuild project, a build action, and use build artifacts
+  pTeam:
+    Type: String
+    Description: Team Name
+    Default: ""
+  pMasterAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/Master/id'
+  pSharedDeplAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/SharedServices/Depl/id'
+  pSharedProdAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/SharedServices/Prod/id'
+  pDevAccountNumber:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/accounts/dev/id'
+  pTestAccountNumber:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/accounts/test/id'
+  pPreProdAccountNumber:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: '/accounts/preprod/id'
+  pProdAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/prod/id'
+  pDeplAccountNumber:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/accounts/depl/id'
+  pRegion1Name:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region1/name'
+  pRegion2Name:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region2/name'
+  pRegion1CodePipelineKmsKey:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region1/kmskeyarn'
+  pRegion2CodePipelineKmsKey:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region2/kmskeyarn'
+  pRegion1CodePipelineArtifactBucket:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region1/s3bucket'
+  pRegion2CodePipelineArtifactBucket:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/region2/s3bucket'
+  pCodePipelineServiceRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/service'
+  pCodePipelineActionRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codepipeline/iam/action'
+  pCodeBuildRole:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: '/pipelinefactory/codebuild/iam'
+
+Conditions:
+  cDevAccountExists:
+    !Not [!Equals [!Ref pDevAccountNumber, "null"]]
+  cTestAccountExists:
+    !Not [!Equals [!Ref pTestAccountNumber, "null"]]
+  cPreProdAccountExists:
+    !Not [!Equals [!Ref pPreProdAccountNumber, "null"]]
+  cProdAccountExists:
+    !Not [!Equals [!Ref pProdAccountNumber, "null"]]
+  cUsWest2DeploymentRegion:
+    !Equals [!Ref pDeploymentRegion, "us-west-2"]
+  cUseConfigurationDev: !Not [ !Equals [!Ref pConfigurationPathDev, '' ]]
+  cUseConfigurationTest: !Not [ !Equals [!Ref pConfigurationPathTest, '' ]]
+  cUseConfigurationPreProd: !Not [ !Equals [!Ref pConfigurationPathPreProd, '' ]]
+  cUseConfigurationProd: !Not [ !Equals [!Ref pConfigurationPathProd, '' ]]
+  cUseCodeBuildProject: !Equals [!Ref pUseCodeBuildProject, 'Yes' ]
+  ############# Adding Region West 2 to pipeline ################
+  cUseConfigurationProdR2: !Not [ !Equals [!Ref pConfigurationPathProdR2, '' ]]
+############# End Adding Region West 2 to pipeline ################
+
+Resources:
+  # ------------
+  # CodeBuild
+  # ------------
+  rCodeBuildCI:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${pProduct}-${pTeam}-CI-${pRegion1Name}
+      Description: This project will be used for Continuous Integration
+      ServiceRole: !Ref pCodeBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: TEMPLATE_BUCKET
+            Value: !Ref pRegion1CodePipelineArtifactBucket
+          - Name: TEMPLATE_PREFIX
+            Value: codebuild
+          - Name: KMS_ARN
+            Value: !Ref pRegion1CodePipelineKmsKey
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-sam.yaml
+      TimeoutInMinutes: 60
+      EncryptionKey: !Ref pRegion1CodePipelineKmsKey
+
+  rCodeBuildCIR2:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${pProduct}-${pTeam}-CI-${pRegion2Name}
+      Description: This project will be used for Continuous Integration
+      ServiceRole: !Ref pCodeBuildRole
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:2.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: TEMPLATE_BUCKET
+            Value: !Ref pRegion2CodePipelineArtifactBucket
+          - Name: TEMPLATE_PREFIX
+            Value: codebuild
+          - Name: KMS_ARN
+            Value: !Ref pRegion2CodePipelineKmsKey
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: iac/CodeBuild/buildspec-sam.yaml
+      TimeoutInMinutes: 60
+      EncryptionKey: !Ref pRegion1CodePipelineKmsKey
+
+  # --------------
+  # CodePipeline
+  # --------------
+  rCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RestartExecutionOnUpdate: True
+      ArtifactStores:
+        - Region: !Ref pRegion1Name
+          ArtifactStore:
+            EncryptionKey:
+              Id: !Ref pRegion1CodePipelineKmsKey
+              Type: KMS
+            Location: !Ref pRegion1CodePipelineArtifactBucket
+            Type: S3
+        - Region: !Ref pRegion2Name
+          ArtifactStore:
+            EncryptionKey:
+              Id: !Ref pRegion2CodePipelineKmsKey
+              Type: KMS
+            Location: !Ref pRegion2CodePipelineArtifactBucket
+            Type: S3
+      Name: !Sub ${pProduct}-${pTeam}
+      RoleArn: !Sub arn:aws:iam::${pDeplAccountNumber}:role/${pCodePipelineServiceRole}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: TemplateSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              Configuration:
+                BranchName: master
+                RepositoryName: !Ref pProduct
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: Source
+              RunOrder: 1
+        - Name: BuildAndPackage
+          Actions:
+            - Name: Update-CodePipeline
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: ScanUpdateCodePipeline
+                UserParameters: !Sub |
+                  {
+                    "cfn_template": "iac/CloudFormation/CodePipeline.yaml",
+                    "cfn_parameter": "iac/CloudFormation/CodePipeline.json"
+                  }
+              InputArtifacts:
+                - Name: Source
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 1
+
+            - Name: Application_Serverless_Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Sub ${pProduct}-${pTeam}-CI-${pRegion1Name}
+              InputArtifacts:
+                - Name: Source
+              OutputArtifacts:
+                - Name: Build
+              RunOrder: 2
+            
+            - Name: Get_Pipeline_Artifacts
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: GetPipelineArtifacts
+                UserParameters: !Sub |
+                  {
+                    "dest_account": "${pDeplAccountNumber}"
+                  }
+              InputArtifacts:
+                - Name: Source
+                - Name: Build
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 4
+
+            - Name: Application_Serverless_Build-R2
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Sub ${pProduct}-${pTeam}-CI-${pRegion2Name}
+              InputArtifacts:
+                - Name: Source
+              OutputArtifacts:
+                - Name: BuildR2
+              RunOrder: 2
+
+            - Name: Get_Pipeline_Artifacts-R2
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              Configuration:
+                FunctionName: GetPipelineArtifacts
+                UserParameters: !Sub |
+                  {
+                    "dest_account": "${pDeplAccountNumber}"
+                  }
+              InputArtifacts:
+                - Name: Source
+                - Name: BuildR2
+              RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+              RunOrder: 4
+        - !If
+          - cDevAccountExists
+          - Name: !Sub ${pTeam}-Dev
+            Actions:
+              - Name: Create-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_REPLACE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-Dev'
+                  RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-SAM-${pTeam}
+                  TemplatePath: !Sub Build::sam-export.yaml
+                  Capabilities: CAPABILITY_NAMED_IAM
+                  ParameterOverrides: !Sub |
+                    {
+                      "pProduct": "${pProduct}",
+                      "pTeam": "${pTeam}",
+                      "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+                    }
+                  # TemplateConfiguration: !If
+                  #   - cUseConfigurationDev
+                  #   - !If
+                  #     - cUseCodeBuildProject
+                  #     - !Sub Build::${pConfigurationPathDev}
+                  #     - !Sub Source::${pConfigurationPathDev}
+                  #   - !Ref AWS::NoValue
+                  # OutputFileName: Outputs-Dev.json
+                InputArtifacts:
+                  - Name: Source
+                  - Name: Build
+                RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 1
+              - Name: Execute-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-Dev'
+                  RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-SAM-${pTeam}
+                  Capabilities: CAPABILITY_NAMED_IAM
+                InputArtifacts:
+                  - Name: Build
+                  - Name: Source
+                RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 2
+                
+          - !Ref "AWS::NoValue"
+      
+        # - !If
+        #   - cDevAccountExists
+        #   - Name: !Sub ${pTeam}-DevR2
+        #     Actions:
+        #       - Name: Create-ChangeSet
+        #         ActionTypeId:
+        #           Category: Deploy
+        #           Owner: AWS
+        #           Provider: CloudFormation
+        #           Version: "1"
+        #         Configuration:
+        #           ActionMode: CHANGE_SET_REPLACE
+        #           ChangeSetName: !Sub 'ChangeSet-${pTeam}-DevR2'
+        #           RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+        #           StackName: !Sub ${pProduct}-SAM-${pTeam}-R2
+        #           TemplatePath: !Sub BuildR2::sam-r2-export.yaml
+        #           Capabilities: CAPABILITY_NAMED_IAM
+        #           ParameterOverrides: !Sub |
+        #             {
+        #               "pProduct": "${pProduct}",
+        #               "pTeam": "${pTeam}",
+        #               "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+        #             }
+        #         InputArtifacts:
+        #           - Name: Source
+        #           - Name: BuildR2
+        #         RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+        #         RunOrder: 1
+        #         Region: !Ref pRegion2Name
+              
+        #       - Name: Execute-ChangeSet
+        #         ActionTypeId:
+        #           Category: Deploy
+        #           Owner: AWS
+        #           Provider: CloudFormation
+        #           Version: "1"
+        #         Configuration:
+        #           ActionMode: CHANGE_SET_EXECUTE
+        #           ChangeSetName: !Sub 'ChangeSet-${pTeam}-DevR2'
+        #           RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+        #           StackName: !Sub ${pProduct}-SAM-${pTeam}-R2
+        #           Capabilities: CAPABILITY_NAMED_IAM
+        #         InputArtifacts:
+        #           - Name: BuildR2
+        #           - Name: Source
+        #         RoleArn: !Sub arn:aws:iam::${pDevAccountNumber}:role/${pCodePipelineActionRole}
+        #         RunOrder: 2
+        #         Region: !Ref pRegion2Name
+        #   - !Ref "AWS::NoValue"
+        - !If
+          - cTestAccountExists
+          - Name: !Sub ${pTeam}-Test_Approval
+            Actions:
+              - Name: TestApproval
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Provider: Manual
+                  Version: "1"
+                Configuration:
+                  NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+                RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+                RunOrder: 1
+          - !Ref "AWS::NoValue"
+        - !If
+          - cTestAccountExists
+          - Name: !Sub ${pTeam}-Test
+            Actions:
+              - Name: Create-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_REPLACE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-Test'
+                  RoleArn: !Sub arn:aws:iam::${pTestAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-sam-${pTeam}
+                  TemplatePath: !Sub Build::sam-export.yaml
+                  Capabilities: CAPABILITY_NAMED_IAM
+                  ParameterOverrides: !Sub |
+                    {
+                      "pProduct": "${pProduct}",
+                      "pTeam": "${pTeam}",
+                      "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+                    }
+                  TemplateConfiguration: !If
+                    - cUseConfigurationTest
+                    - !If
+                      - cUseCodeBuildProject
+                      - !Sub Build::${pConfigurationPathTest}
+                      - !Sub Source::${pConfigurationPathTest}
+                    - !Ref AWS::NoValue
+                  OutputFileName: Outputs-Test.json
+                InputArtifacts:
+                  - Name: Source
+                  - Name: Build
+                RoleArn: !Sub arn:aws:iam::${pTestAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 1
+              - Name: Execute-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-Test'
+                  RoleArn: !Sub arn:aws:iam::${pTestAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-sam-${pTeam}
+                  Capabilities: CAPABILITY_NAMED_IAM
+                InputArtifacts:
+                  - Name: Build
+                  - Name: Source
+                RoleArn: !Sub arn:aws:iam::${pTestAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 2
+          - !Ref "AWS::NoValue"
+        - !If
+          - cPreProdAccountExists
+          - Name: !Sub ${pTeam}-PreProd_Approval
+            Actions:
+              - Name: PreProdApproval
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Provider: Manual
+                  Version: "1"
+                Configuration:
+                  NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+                RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+                RunOrder: 1
+          - !Ref "AWS::NoValue"
+        - !If
+          - cPreProdAccountExists
+          - Name: !Sub ${pTeam}-PreProd
+            Actions:
+              - Name: Create-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_REPLACE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-PreProd'
+                  RoleArn: !Sub arn:aws:iam::${pPreProdAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-sam-${pTeam}
+                  TemplatePath: !Sub Build::sam-export.yaml
+                  Capabilities: CAPABILITY_NAMED_IAM
+                  ParameterOverrides: !Sub |
+                    {
+                      "pProduct": "${pProduct}",
+                      "pTeam": "${pTeam}",
+                      "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+                    }
+                  TemplateConfiguration: !If
+                    - cUseConfigurationPreProd
+                    - !If
+                      - cUseCodeBuildProject
+                      - !Sub Build::${pConfigurationPathPreProd}
+                      - !Sub Source::${pConfigurationPathPreProd}
+                    - !Ref AWS::NoValue
+                  OutputFileName: Outputs-PreProd.json
+                InputArtifacts:
+                  - Name: Source
+                  - Name: Build
+                RoleArn: !Sub arn:aws:iam::${pPreProdAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 1
+              - Name: Execute-ChangeSet
+                ActionTypeId:
+                  Category: Deploy
+                  Owner: AWS
+                  Provider: CloudFormation
+                  Version: "1"
+                Configuration:
+                  ActionMode: CHANGE_SET_EXECUTE
+                  ChangeSetName: !Sub 'ChangeSet-${pTeam}-PreProd'
+                  RoleArn: !Sub arn:aws:iam::${pPreProdAccountNumber}:role/${pCodePipelineActionRole}
+                  StackName: !Sub ${pProduct}-sam-${pTeam}
+                  Capabilities: CAPABILITY_NAMED_IAM
+                InputArtifacts:
+                  - Name: Build
+                  - Name: Source
+                RoleArn: !Sub arn:aws:iam::${pPreProdAccountNumber}:role/${pCodePipelineActionRole}
+                RunOrder: 2
+          - !Ref "AWS::NoValue"
+        - !If
+          - cProdAccountExists
+          - Name: !Sub ${pTeam}-Prod_Approval
+            Actions:
+              - Name: ProdApproval
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Provider: Manual
+                  Version: "1"
+                Configuration:
+                  NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+                RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+                RunOrder: 1
+          - !Ref "AWS::NoValue"
+        - Name: !Sub ${pTeam}-Prod
+          Actions:
+            - Name: Create-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: !Sub 'ChangeSet-${pTeam}-Prod'
+                RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+                StackName: !Sub ${pProduct}-sam-${pTeam}
+                TemplatePath: !Sub Build::sam-export.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
+                ParameterOverrides: !Sub |
+                  {
+                    "pProduct": "${pProduct}",
+                    "pTeam": "${pTeam}",
+                    "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+                  }
+                TemplateConfiguration: !If
+                  - cUseConfigurationProd
+                  - !If
+                    - cUseCodeBuildProject
+                    - !Sub Build::${pConfigurationPathProd}
+                    - !Sub Source::${pConfigurationPathProd}
+                  - !Ref AWS::NoValue
+                OutputFileName: Outputs-Prod.json
+              InputArtifacts:
+                - Name: Source
+                - Name: Build
+              RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+              RunOrder: 1
+            - Name: Execute-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: !Sub 'ChangeSet-${pTeam}-Prod'
+                RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+                StackName: !Sub ${pProduct}-sam-${pTeam}
+                Capabilities: CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: Build
+                - Name: Source
+              RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+              RunOrder: 2
+
+        - !If
+          - cProdAccountExists
+          - Name: !Sub ${pTeam}-ProdR2_Approval
+            Actions:
+              - Name: ProdR2Approval
+                ActionTypeId:
+                  Category: Approval
+                  Owner: AWS
+                  Provider: Manual
+                  Version: "1"
+                Configuration:
+                  NotificationArn: !Sub arn:aws:sns:${pRegion1Name}:${pSharedProdAccountNumber}:DeliveryPipelineManualApproval
+                RoleArn: !Sub arn:aws:iam::${pSharedProdAccountNumber}:role/Shared-Lambda-Action
+                RunOrder: 1
+          - !Ref "AWS::NoValue"
+
+        - Name: !Sub ${pTeam}-ProdR2
+          Actions:
+            - Name: Create-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                ChangeSetName: !Sub 'ChangeSet-${pTeam}-ProdR2'
+                RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+                StackName: !Sub ${pProduct}-sam-${pTeam}-R2
+                TemplatePath: !Sub BuildR2::sam-r2-export.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
+                ParameterOverrides: !Sub |
+                  {
+                    "pProduct": "${pProduct}",
+                    "pTeam": "${pTeam}",
+                    "pCodePipelineArtifactBucket": "${pRegion1CodePipelineArtifactBucket}"
+                  }
+                TemplateConfiguration: !If
+                  - cUseConfigurationProdR2
+                  - !If
+                    - cUseCodeBuildProject
+                    - !Sub Build::${pConfigurationPathProdR2}
+                    - !Sub Source::${pConfigurationPathProdR2}
+                  - !Ref AWS::NoValue
+                OutputFileName: Outputs-Prod-R2.json
+              InputArtifacts:
+                - Name: Source
+                - Name: BuildR2
+              RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+              RunOrder: 1
+              Region: !Ref pRegion2Name
+            
+            - Name: Execute-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                ChangeSetName: !Sub 'ChangeSet-${pTeam}-ProdR2'
+                RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+                StackName: !Sub ${pProduct}-sam-${pTeam}-R2
+                Capabilities: CAPABILITY_NAMED_IAM
+              InputArtifacts:
+                - Name: BuildR2
+                - Name: Source
+              RoleArn: !Sub arn:aws:iam::${pProdAccountNumber}:role/${pCodePipelineActionRole}
+              RunOrder: 2
+              Region: !Ref pRegion2Name
+      DisableInboundStageTransitions:
+        - StageName: !Sub ${pTeam}-Prod
+          Reason: "Disabling the transition until Change Record is completed."
